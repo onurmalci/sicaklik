@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 import streamlit as st
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
@@ -26,7 +26,7 @@ DEFAULT_ADANA_PATH = r"C:\Users\firat\Desktop\tez\proje\Adana Sıcaklık Trafola
 DEFAULT_MERSIN_PATH = r"C:\Users\firat\Desktop\tez\proje\Mersin Sıcaklık Trafolar.xlsx"
 CACHE_DIR = APP_DIR / ".streamlit_cache"
 PREPARED_CACHE_PATH = CACHE_DIR / "prepared_data.pkl"
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 RANDOM_STATE = 42
 RF_ESTIMATORS = 100
 SVM_C = 100.0
@@ -178,7 +178,7 @@ def resolve_data_paths() -> tuple[str, str]:
 
 
 def parse_zaman_series(series: pd.Series) -> pd.Series:
-    """Notebook ile aynı: Türkçe ay adlarını İngilizceye çevirip %B %Y ile parse eder."""
+    """Notebook hücresi 11 ile birebir: ay_map + %B %Y."""
     localized = series.astype("string").str.strip().replace(TURKISH_TO_ENGLISH_MONTH, regex=True)
     return pd.to_datetime(localized, format="%B %Y", errors="coerce")
 
@@ -240,6 +240,7 @@ def load_and_prepare_data(adana_path: str, mersin_path: str) -> dict[str, Any]:
     df_last = df[(df["Zaman"] >= "2024-07-01") & (df["Zaman"] <= "2024-12-31")].copy()
     df_train = df[df["Zaman"] < "2024-07-01"].copy()
     df_train["Zaman"] = pd.to_datetime(df_train["Zaman"])
+    df_train = df_train.sort_values("Zaman")
     df_train["Yil"] = df_train["Zaman"].dt.year
     df_train["Ay"] = df_train["Zaman"].dt.month
 
@@ -247,23 +248,15 @@ def load_and_prepare_data(adana_path: str, mersin_path: str) -> dict[str, Any]:
     if TARGET in feature_columns:
         feature_columns.remove(TARGET)
 
-    df_last_monthly = (
-        df_last.set_index("Zaman")
-        .resample("MS")
-        .mean(numeric_only=True)
-        .reset_index()
-        .sort_values("Zaman")
-    )
+    df_last_monthly = df_last.set_index("Zaman").resample("MS").mean().reset_index()
 
     input_stats = df_train[feature_columns].describe(percentiles=[0.25, 0.5, 0.75]).T
-    latest_features = df_train[feature_columns].iloc[-1].to_dict()
 
     payload = {
         "df_train": df_train,
         "df_last_monthly": df_last_monthly,
         "feature_columns": feature_columns,
         "input_stats": input_stats,
-        "latest_features": latest_features,
         "category_options": category_options,
         "row_counts": {
             "raw": len(raw_df),
@@ -295,7 +288,6 @@ def train_random_forest(
     model = RandomForestRegressor(
         n_estimators=n_estimators,
         random_state=random_state,
-        n_jobs=-1,
     )
     model.fit(x_train, y_train)
     predictions = model.predict(x_test)
@@ -354,13 +346,11 @@ def train_lstm(
     random_state: int,
 ) -> NeuralModel:
     try:
-        import tensorflow as tf
-        from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
+        from tensorflow.keras.layers import LSTM, Dense, Dropout
         from tensorflow.keras.models import Sequential
     except (ImportError, OSError) as exc:
         raise NeuralModelUnavailable(str(exc)) from exc
 
-    tf.keras.utils.set_random_seed(random_state)
     x_raw = df_train[features]
     y_raw = df_train[TARGET]
 
@@ -379,10 +369,10 @@ def train_lstm(
 
     model = Sequential(
         [
-            Input(shape=(x_train.shape[1], x_train.shape[2])),
             LSTM(
                 64,
                 activation="relu",
+                input_shape=(x_train.shape[1], x_train.shape[2]),
                 return_sequences=True,
             ),
             Dropout(0.2),
@@ -423,13 +413,11 @@ def train_cnn_gru(
     random_state: int,
 ) -> NeuralModel:
     try:
-        import tensorflow as tf
-        from tensorflow.keras.layers import GRU, Conv1D, Dense, Dropout, Input, MaxPooling1D
+        from tensorflow.keras.layers import GRU, Conv1D, Dense, Dropout, MaxPooling1D
         from tensorflow.keras.models import Sequential
     except (ImportError, OSError) as exc:
         raise NeuralModelUnavailable(str(exc)) from exc
 
-    tf.keras.utils.set_random_seed(random_state)
     x_raw = df_train[features]
     y_raw = df_train[TARGET]
 
@@ -448,11 +436,11 @@ def train_cnn_gru(
 
     model = Sequential(
         [
-            Input(shape=(x_train.shape[1], x_train.shape[2])),
             Conv1D(
                 filters=64,
                 kernel_size=1,
                 activation="relu",
+                input_shape=(x_train.shape[1], x_train.shape[2]),
             ),
             MaxPooling1D(pool_size=1),
             GRU(48, activation="relu", return_sequences=False),
@@ -503,22 +491,22 @@ def predict_model(model_name: str, model_bundle: Any, rows: pd.DataFrame) -> np.
     return model_bundle.scaler_y.inverse_transform(predictions_scaled).ravel()
 
 
-def make_future_frame(features: list[str], latest_features: dict[str, float]) -> pd.DataFrame:
+def make_future_frame(df_train: pd.DataFrame, features: list[str]) -> tuple[pd.DataFrame, pd.DatetimeIndex]:
     future_dates = pd.date_range(start="2024-07-01", end="2024-12-31", freq="MS")
     future_df = pd.DataFrame(index=range(len(future_dates)), columns=features)
     for col in features:
-        future_df[col] = latest_features.get(col, 0)
+        future_df[col] = df_train[col].iloc[-1]
     future_df["Yil"] = future_dates.year
     future_df["Ay"] = future_dates.month
-    return future_df.astype(float), future_dates
+    return future_df, future_dates
 
 
 def build_forecasts(
     trained_models: dict[str, Any],
+    df_train: pd.DataFrame,
     features: list[str],
-    latest_features: dict[str, float],
 ) -> pd.DataFrame:
-    future_df, future_dates = make_future_frame(features, latest_features)
+    future_df, future_dates = make_future_frame(df_train, features)
     forecast_df = pd.DataFrame({"Zaman": future_dates})
     for model_name, model_bundle in trained_models.items():
         forecast_df[model_name] = predict_model(model_name, model_bundle, future_df)
@@ -584,86 +572,77 @@ def train_selected_models(df_train: pd.DataFrame, features: list[str], model_nam
     return trained_models
 
 
-def forecast_x_range(actual_monthly: pd.DataFrame) -> pd.DatetimeIndex:
-    start_time = pd.to_datetime(actual_monthly["Zaman"].iloc[0])
-    return pd.date_range(start=start_time, end="2024-12-31", freq="MS")
-
-
 def plot_forecast(
     selected_model: str,
     actual_monthly: pd.DataFrame,
     forecast_df: pd.DataFrame,
-) -> go.Figure:
+) -> plt.Figure:
+    """Notebook matplotlib grafikleriyle birebir aynı çizim."""
     all_models = selected_model == "Tüm Modeller"
     model_names = list(MODEL_COLORS) if all_models else [selected_model]
-    x_range = forecast_x_range(actual_monthly)
-    tick_labels = [d.strftime("%Y-%m") for d in x_range]
+    future_dates = forecast_df["Zaman"]
+    start_time = actual_monthly["Zaman"].iloc[0]
+    all_dates = pd.date_range(start=start_time, end="2024-12-31", freq="MS")
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=actual_monthly["Zaman"],
-            y=actual_monthly[TARGET],
-            mode="lines+markers",
-            name="Gerçek Değerler",
-            line={"color": "black", "dash": "dash", "width": 3.0 if all_models else 2.5},
-            marker={"size": 7 if all_models else 6, "symbol": "circle"},
+    if all_models:
+        fig, ax = plt.subplots(figsize=(15, 8))
+        actual_style = {"linewidth": 3.0, "markersize": 7}
+        pred_marker = "s"
+        pred_size = 6
+        pred_width = 2.0
+        grid_alpha = 0.6
+        title = (
+            f"2024 Yılı 2. Yarı {TARGET_LABEL} - Tüm Modellerin Tahmin Karşılaştırması"
         )
+        title_size = 16
+    else:
+        figsize = (14, 7) if selected_model == "Random Forest" else (12, 6)
+        fig, ax = plt.subplots(figsize=figsize)
+        actual_style = {"linewidth": 2.5, "markersize": 6}
+        pred_marker = "s" if selected_model == "Random Forest" else "D"
+        pred_size = 6 if selected_model == "Random Forest" else 8
+        pred_width = 2.0 if selected_model == "Random Forest" else 2.5
+        grid_alpha = 0.5
+        title = f"2024 Yılı 2. Yarı {TARGET_LABEL} Gerçek vs Tahmin Karşılaştırması"
+        title_size = 15
+
+    ax.plot(
+        actual_monthly["Zaman"],
+        actual_monthly[TARGET],
+        label="Gerçek Değerler",
+        color="black",
+        linestyle="--",
+        marker="o",
+        **actual_style,
     )
 
     for name in model_names:
         if name not in forecast_df.columns:
             continue
-        label = name if all_models else MODEL_PREDICTION_LABELS.get(name, name)
-        marker_symbol = "square" if all_models or name == "Random Forest" else "diamond"
-        fig.add_trace(
-            go.Scatter(
-                x=forecast_df["Zaman"],
-                y=forecast_df[name],
-                mode="lines+markers",
-                name=label,
-                line={"color": MODEL_COLORS[name], "dash": "dash", "width": 2.0},
-                marker={"size": 6, "symbol": marker_symbol},
-            )
+        label = name if all_models else MODEL_PREDICTION_LABELS[name]
+        ax.plot(
+            future_dates,
+            forecast_df[name],
+            label=label,
+            color=MODEL_COLORS[name],
+            linestyle="--",
+            marker=pred_marker,
+            markersize=pred_size,
+            linewidth=pred_width,
         )
 
+    ax.set_title(title, fontsize=title_size, pad=15 if all_models else None)
+    ax.set_xlabel("Zaman (Aylar)", fontsize=12)
+    ax.set_ylabel(TARGET_LABEL, fontsize=12)
+    ax.grid(True, linestyle="--", alpha=grid_alpha)
+    ax.set_xticks(all_dates)
+    ax.set_xticklabels([d.strftime("%Y-%m") for d in all_dates], rotation=45, fontsize=10)
+    ax.tick_params(axis="y", labelsize=10)
+    legend_kwargs = {"fontsize": 11}
     if all_models:
-        title = (
-            f"2024 Yılı 2. Yarı {TARGET_LABEL} - Tüm Modellerin Tahmin Karşılaştırması"
-        )
-        height = 800
-    else:
-        title = f"2024 Yılı 2. Yarı {TARGET_LABEL} Gerçek vs Tahmin Karşılaştırması"
-        height = 700 if selected_model == "Random Forest" else 600
-
-    fig.update_layout(
-        title={"text": title, "font": {"size": 16 if all_models else 15}},
-        xaxis_title="Zaman (Aylar)",
-        yaxis_title=TARGET_LABEL,
-        hovermode="x unified",
-        template="plotly_white",
-        height=height,
-        legend={
-            "orientation": "v",
-            "yanchor": "top",
-            "y": 1.0,
-            "xanchor": "right",
-            "x": 1.0,
-            "font": {"size": 11},
-            "bgcolor": "rgba(255,255,255,0.85)",
-        },
-        margin={"l": 60, "r": 30, "t": 90, "b": 90},
-    )
-    fig.update_xaxes(
-        tickmode="array",
-        tickvals=x_range,
-        ticktext=tick_labels,
-        tickangle=45,
-        showgrid=True,
-        gridcolor="lightgray",
-        griddash="dash",
-    )
-    fig.update_yaxes(showgrid=True, gridcolor="lightgray", griddash="dash")
+        legend_kwargs.update({"loc": "upper right", "frameon": True, "shadow": True})
+    ax.legend(**legend_kwargs)
+    fig.tight_layout()
     return fig
 
 
@@ -756,11 +735,7 @@ def main() -> None:
             "Seçilen grafik için model üretilemedi. TensorFlow sorunu çözülene kadar Random Forest veya SVM grafiğini kullanabilirsin."
         )
 
-    forecast_df = build_forecasts(
-        trained_models,
-        features,
-        prepared["latest_features"],
-    )
+    forecast_df = build_forecasts(trained_models, df_train, features)
 
     count_cols = st.columns(3)
     count_cols[0].metric("Ham satır", f"{row_counts['raw']:,}")
@@ -771,10 +746,9 @@ def main() -> None:
     if chart_model not in trained_models and chart_model != "Tüm Modeller":
         chart_model = "Tüm Modeller"
 
-    st.plotly_chart(
-        plot_forecast(chart_model, prepared["df_last_monthly"], forecast_df),
-        use_container_width=True,
-    )
+    forecast_fig = plot_forecast(chart_model, prepared["df_last_monthly"], forecast_df)
+    st.pyplot(forecast_fig, use_container_width=True)
+    plt.close(forecast_fig)
 
     with st.expander("Model performansları", expanded=True):
         st.dataframe(
