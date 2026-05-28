@@ -26,12 +26,12 @@ DEFAULT_ADANA_PATH = r"C:\Users\firat\Desktop\tez\proje\Adana Sıcaklık Trafola
 DEFAULT_MERSIN_PATH = r"C:\Users\firat\Desktop\tez\proje\Mersin Sıcaklık Trafolar.xlsx"
 CACHE_DIR = APP_DIR / ".streamlit_cache"
 PREPARED_CACHE_PATH = CACHE_DIR / "prepared_data.pkl"
+CACHE_VERSION = 2
 RANDOM_STATE = 42
 RF_ESTIMATORS = 80
 SVM_C = 100.0
 SVM_GAMMA = 0.1
 SVM_EPSILON = 0.1
-SVM_MAX_ROWS = 4_000
 LSTM_EPOCHS = 20
 CNN_GRU_EPOCHS = 20
 BATCH_SIZE = 32
@@ -155,6 +155,7 @@ def file_signature(path: Path) -> dict[str, Any]:
 
 def cache_signature(adana_path: Path, mersin_path: Path) -> dict[str, Any]:
     return {
+        "version": CACHE_VERSION,
         "adana": file_signature(adana_path),
         "mersin": file_signature(mersin_path),
     }
@@ -193,6 +194,18 @@ def parse_turkish_month_series(series: pd.Series) -> pd.Series:
     return parsed_dates
 
 
+def parse_capacity_date_series(series: pd.Series) -> pd.Series:
+    parsed_dates = pd.to_datetime(series, errors="coerce")
+    missing_string_mask = parsed_dates.isna() & series.notna()
+    if missing_string_mask.any():
+        parsed_dates.loc[missing_string_mask] = pd.to_datetime(
+            series.loc[missing_string_mask].astype("string"),
+            format="%Y-%m-%dT%H:%M:%S",
+            errors="coerce",
+        )
+    return parsed_dates
+
+
 @st.cache_data(show_spinner="Veriler okunuyor ve hazırlanıyor...")
 def load_and_prepare_data(adana_path: str, mersin_path: str) -> dict[str, Any]:
     adana_file = Path(adana_path)
@@ -222,7 +235,7 @@ def load_and_prepare_data(adana_path: str, mersin_path: str) -> dict[str, Any]:
 
     df = raw_df.copy()
     df["Zaman"] = parse_turkish_month_series(df["Zaman"])
-    df["Anlık Kapasite Tarihi"] = pd.to_datetime(df["Anlık Kapasite Tarihi"], errors="coerce")
+    df["Anlık Kapasite Tarihi"] = parse_capacity_date_series(df["Anlık Kapasite Tarihi"])
     r_factor = pd.to_numeric(df["R Faktörü"], errors="coerce")
     df["R Faktörü"] = r_factor.fillna(r_factor.median())
 
@@ -319,11 +332,9 @@ def train_svm(
     c_value: float,
     gamma_value: float,
     epsilon_value: float,
-    max_rows: int,
 ) -> ClassicalModel:
-    training_df = df_train.tail(max_rows).copy() if len(df_train) > max_rows else df_train
-    x = training_df[features]
-    y = training_df[TARGET]
+    x = df_train[features]
+    y = df_train[TARGET]
     x_train, x_test, y_train, y_test = train_test_split(
         x,
         y,
@@ -554,7 +565,6 @@ def train_selected_models(df_train: pd.DataFrame, features: list[str], model_nam
             SVM_C,
             SVM_GAMMA,
             SVM_EPSILON,
-            SVM_MAX_ROWS,
         )
 
     neural_requests = [name for name in ["LSTM", "CNN-GRU"] if name in model_names]
