@@ -1,0 +1,4 @@
+__pycache__/
+.streamlit_cache/
+*.log
+.ipynb_checkpoints/
