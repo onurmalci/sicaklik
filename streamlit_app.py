@@ -16,7 +16,7 @@ from sklearn.svm import SVR
 
 
 TARGET = "Ortalama ΔθTO"
-TARGET_LABEL = "Ortalama ΔθTO"
+TARGET_LABEL = r"Ortalama $\Delta\theta_{TO}$"
 SHEET_NAME = "Puant Raporu"
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
@@ -26,34 +26,19 @@ DEFAULT_ADANA_PATH = r"C:\Users\firat\Desktop\tez\proje\Adana Sıcaklık Trafola
 DEFAULT_MERSIN_PATH = r"C:\Users\firat\Desktop\tez\proje\Mersin Sıcaklık Trafolar.xlsx"
 CACHE_DIR = APP_DIR / ".streamlit_cache"
 PREPARED_CACHE_PATH = CACHE_DIR / "prepared_data.pkl"
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 RANDOM_STATE = 42
-RF_ESTIMATORS = 80
+RF_ESTIMATORS = 100
 SVM_C = 100.0
 SVM_GAMMA = 0.1
 SVM_EPSILON = 0.1
-LSTM_EPOCHS = 20
-CNN_GRU_EPOCHS = 20
-BATCH_SIZE = 32
+LSTM_EPOCHS = 50
+CNN_GRU_EPOCHS = 60
+NEURAL_BATCH_SIZE = 16
 
 
 class NeuralModelUnavailable(RuntimeError):
     pass
-
-MONTH_NUMBER_MAP = {
-    "Ocak": 1,
-    "Şubat": 2,
-    "Mart": 3,
-    "Nisan": 4,
-    "Mayıs": 5,
-    "Haziran": 6,
-    "Temmuz": 7,
-    "Ağustos": 8,
-    "Eylül": 9,
-    "Ekim": 10,
-    "Kasım": 11,
-    "Aralık": 12,
-}
 
 INITIAL_DROP_COLUMNS = [
     "Trafo",
@@ -106,6 +91,7 @@ NUMERIC_INPUTS = [
     "Ortalama_Stot",
     "Maksimum_Stot",
     "Minimum_Stot",
+    "Enlem",
     "Enlem ",
     "Boylam",
     "Ortalama Rüzgar Hızı (kph)",
@@ -113,10 +99,32 @@ NUMERIC_INPUTS = [
 
 MODEL_OPTIONS = ["Random Forest", "SVM", "LSTM", "CNN-GRU", "Tüm Modeller"]
 MODEL_COLORS = {
-    "Random Forest": "#d62728",
-    "SVM": "#008080",
-    "LSTM": "#228b22",
-    "CNN-GRU": "#663399",
+    "Random Forest": "red",
+    "SVM": "teal",
+    "LSTM": "forestgreen",
+    "CNN-GRU": "rebeccapurple",
+}
+
+MODEL_PREDICTION_LABELS = {
+    "Random Forest": "Model Tahmini (2024 2. Yarı)",
+    "SVM": "SVM Modeli Tahmini (2024 2. Yarı)",
+    "LSTM": "LSTM Modeli Tahmini (2024 2. Yarı)",
+    "CNN-GRU": "CNN-GRU Modeli Tahmini (2024 2. Yarı)",
+}
+
+TURKISH_TO_ENGLISH_MONTH = {
+    "Ocak": "January",
+    "Şubat": "February",
+    "Mart": "March",
+    "Nisan": "April",
+    "Mayıs": "May",
+    "Haziran": "June",
+    "Temmuz": "July",
+    "Ağustos": "August",
+    "Eylül": "September",
+    "Ekim": "October",
+    "Kasım": "November",
+    "Aralık": "December",
 }
 
 
@@ -169,41 +177,14 @@ def resolve_data_paths() -> tuple[str, str]:
     return DEFAULT_ADANA_PATH, DEFAULT_MERSIN_PATH
 
 
-def parse_turkish_month_series(series: pd.Series) -> pd.Series:
-    text_values = series.astype("string").str.strip()
-    month_pattern = "|".join(MONTH_NUMBER_MAP)
-    extracted = text_values.str.extract(rf"(?P<month>{month_pattern})\s+(?P<year>\d{{4}})")
-    month_numbers = extracted["month"].map(MONTH_NUMBER_MAP)
-    years = pd.to_numeric(extracted["year"], errors="coerce")
-    parsed_dates = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
-
-    turkish_mask = month_numbers.notna() & years.notna()
-    parsed_dates.loc[turkish_mask] = pd.to_datetime(
-        {
-            "year": years.loc[turkish_mask].astype(int),
-            "month": month_numbers.loc[turkish_mask].astype(int),
-            "day": 1,
-        },
-        errors="coerce",
-    )
-
-    remainder_mask = ~turkish_mask & series.notna()
-    if remainder_mask.any():
-        parsed_dates.loc[remainder_mask] = pd.to_datetime(series.loc[remainder_mask], errors="coerce")
-
-    return parsed_dates
+def parse_zaman_series(series: pd.Series) -> pd.Series:
+    """Notebook ile aynı: Türkçe ay adlarını İngilizceye çevirip %B %Y ile parse eder."""
+    localized = series.astype("string").str.strip().replace(TURKISH_TO_ENGLISH_MONTH, regex=True)
+    return pd.to_datetime(localized, format="%B %Y", errors="coerce")
 
 
 def parse_capacity_date_series(series: pd.Series) -> pd.Series:
-    parsed_dates = pd.to_datetime(series, errors="coerce")
-    missing_string_mask = parsed_dates.isna() & series.notna()
-    if missing_string_mask.any():
-        parsed_dates.loc[missing_string_mask] = pd.to_datetime(
-            series.loc[missing_string_mask].astype("string"),
-            format="%Y-%m-%dT%H:%M:%S",
-            errors="coerce",
-        )
-    return parsed_dates
+    return pd.to_datetime(series, format="ISO8601", errors="coerce")
 
 
 @st.cache_data(show_spinner="Veriler okunuyor ve hazırlanıyor...")
@@ -234,15 +215,16 @@ def load_and_prepare_data(adana_path: str, mersin_path: str) -> dict[str, Any]:
     }
 
     df = raw_df.copy()
-    df["Zaman"] = parse_turkish_month_series(df["Zaman"])
+    df["Zaman"] = parse_zaman_series(df["Zaman"])
     df["Anlık Kapasite Tarihi"] = parse_capacity_date_series(df["Anlık Kapasite Tarihi"])
     r_factor = pd.to_numeric(df["R Faktörü"], errors="coerce")
-    df["R Faktörü"] = r_factor.fillna(r_factor.median())
+    r_median = r_factor.median()
+    df["R Faktörü"] = r_factor.fillna(r_median).fillna(r_median)
 
     df = _safe_drop(df, INITIAL_DROP_COLUMNS)
     df = df.dropna()
 
-    categorical_columns = df.select_dtypes(include=["object", "string"]).columns
+    categorical_columns = df.select_dtypes(include=["object"]).columns
     df = pd.get_dummies(df, columns=categorical_columns, drop_first=True)
     df = _safe_drop(df, MODEL_DROP_COLUMNS)
     df = df.sort_values("Zaman")
@@ -575,7 +557,7 @@ def train_selected_models(df_train: pd.DataFrame, features: list[str], model_nam
                     df_train,
                     features,
                     LSTM_EPOCHS,
-                    BATCH_SIZE,
+                    NEURAL_BATCH_SIZE,
                     RANDOM_STATE,
                 )
             if "CNN-GRU" in neural_requests:
@@ -583,7 +565,7 @@ def train_selected_models(df_train: pd.DataFrame, features: list[str], model_nam
                     df_train,
                     features,
                     CNN_GRU_EPOCHS,
-                    BATCH_SIZE,
+                    NEURAL_BATCH_SIZE,
                     RANDOM_STATE,
                 )
         except NeuralModelUnavailable as exc:
@@ -602,11 +584,21 @@ def train_selected_models(df_train: pd.DataFrame, features: list[str], model_nam
     return trained_models
 
 
+def forecast_x_range(actual_monthly: pd.DataFrame) -> pd.DatetimeIndex:
+    start_time = pd.to_datetime(actual_monthly["Zaman"].iloc[0])
+    return pd.date_range(start=start_time, end="2024-12-31", freq="MS")
+
+
 def plot_forecast(
     selected_model: str,
     actual_monthly: pd.DataFrame,
     forecast_df: pd.DataFrame,
 ) -> go.Figure:
+    all_models = selected_model == "Tüm Modeller"
+    model_names = list(MODEL_COLORS) if all_models else [selected_model]
+    x_range = forecast_x_range(actual_monthly)
+    tick_labels = [d.strftime("%Y-%m") for d in x_range]
+
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
@@ -614,41 +606,64 @@ def plot_forecast(
             y=actual_monthly[TARGET],
             mode="lines+markers",
             name="Gerçek Değerler",
-            line={"color": "#111111", "dash": "dash", "width": 3},
-            marker={"size": 8},
+            line={"color": "black", "dash": "dash", "width": 3.0 if all_models else 2.5},
+            marker={"size": 7 if all_models else 6, "symbol": "circle"},
         )
     )
 
-    names = list(MODEL_COLORS) if selected_model == "Tüm Modeller" else [selected_model]
-    for name in names:
+    for name in model_names:
         if name not in forecast_df.columns:
             continue
+        label = name if all_models else MODEL_PREDICTION_LABELS.get(name, name)
+        marker_symbol = "square" if all_models or name == "Random Forest" else "diamond"
         fig.add_trace(
             go.Scatter(
                 x=forecast_df["Zaman"],
                 y=forecast_df[name],
                 mode="lines+markers",
-                name=name,
-                line={"color": MODEL_COLORS[name], "dash": "dash", "width": 2.5},
-                marker={"size": 8, "symbol": "square"},
+                name=label,
+                line={"color": MODEL_COLORS[name], "dash": "dash", "width": 2.0},
+                marker={"size": 6, "symbol": marker_symbol},
             )
         )
 
-    title = (
-        "2024 İkinci Yarı Tüm Model Tahminleri"
-        if selected_model == "Tüm Modeller"
-        else f"2024 İkinci Yarı {selected_model} Tahmini"
-    )
+    if all_models:
+        title = (
+            f"2024 Yılı 2. Yarı {TARGET_LABEL} - Tüm Modellerin Tahmin Karşılaştırması"
+        )
+        height = 800
+    else:
+        title = f"2024 Yılı 2. Yarı {TARGET_LABEL} Gerçek vs Tahmin Karşılaştırması"
+        height = 700 if selected_model == "Random Forest" else 600
+
     fig.update_layout(
-        title=title,
-        xaxis_title="Zaman",
+        title={"text": title, "font": {"size": 16 if all_models else 15}},
+        xaxis_title="Zaman (Aylar)",
         yaxis_title=TARGET_LABEL,
         hovermode="x unified",
         template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
-        margin={"l": 20, "r": 20, "t": 80, "b": 20},
+        height=height,
+        legend={
+            "orientation": "v",
+            "yanchor": "top",
+            "y": 1.0,
+            "xanchor": "right",
+            "x": 1.0,
+            "font": {"size": 11},
+            "bgcolor": "rgba(255,255,255,0.85)",
+        },
+        margin={"l": 60, "r": 30, "t": 90, "b": 90},
     )
-    fig.update_xaxes(tickformat="%Y-%m", dtick="M1")
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=x_range,
+        ticktext=tick_labels,
+        tickangle=45,
+        showgrid=True,
+        gridcolor="lightgray",
+        griddash="dash",
+    )
+    fig.update_yaxes(showgrid=True, gridcolor="lightgray", griddash="dash")
     return fig
 
 
