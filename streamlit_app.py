@@ -22,8 +22,6 @@ APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 ADANA_FILE_NAME = "Adana Sıcaklık Trafolar.xlsx"
 MERSIN_FILE_NAME = "Mersin Sıcaklık Trafolar.xlsx"
-DEFAULT_ADANA_PATH = r"C:\Users\firat\Desktop\tez\proje\Adana Sıcaklık Trafolar.xlsx"
-DEFAULT_MERSIN_PATH = r"C:\Users\firat\Desktop\tez\proje\Mersin Sıcaklık Trafolar.xlsx"
 CACHE_DIR = APP_DIR / ".streamlit_cache"
 PREPARED_CACHE_PATH = CACHE_DIR / "prepared_data.pkl"
 CACHE_VERSION = 4
@@ -172,9 +170,7 @@ def cache_signature(adana_path: Path, mersin_path: Path) -> dict[str, Any]:
 def resolve_data_paths() -> tuple[str, str]:
     repo_adana = DATA_DIR / ADANA_FILE_NAME
     repo_mersin = DATA_DIR / MERSIN_FILE_NAME
-    if repo_adana.exists() and repo_mersin.exists():
-        return str(repo_adana), str(repo_mersin)
-    return DEFAULT_ADANA_PATH, DEFAULT_MERSIN_PATH
+    return str(repo_adana), str(repo_mersin)
 
 
 def parse_zaman_series(series: pd.Series) -> pd.Series:
